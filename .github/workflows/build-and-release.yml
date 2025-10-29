@@ -1,0 +1,160 @@
+name: Build and Release to Artifactory
+
+on:
+  push:
+    tags:
+      - "*.*.*.*.*" # Triggers on tags like 1.0.0.build.1, 1.0.1.build.2, etc.
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+jobs:
+  build-and-push-release:
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      version_no_v: ${{ steps.get-version.outputs.version_no_v }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get-version
+        run: |
+          # Extract full tag (e.g., 1.0.0.build.1)
+          FULL_TAG=${GITHUB_REF#refs/tags/}
+          echo "version=$FULL_TAG" >> $GITHUB_OUTPUT
+          echo "tag=$FULL_TAG" >> $GITHUB_OUTPUT
+
+          echo "Version: $FULL_TAG"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push all images
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+        run: |
+          cd kubernetes-deployment
+          export DOCKER_REGISTRY="${ECR_REGISTRY}/ascintra"
+          export DOCKER_TAG="$VERSION"
+
+          echo "Building all images with tag: $VERSION"
+          ./scripts/build-images.sh $VERSION
+
+          echo "Pushing all images to ECR"
+          ./scripts/push-images.sh $VERSION
+
+  package-helm-charts:
+    needs: build-and-push-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: "3.12.0"
+
+      - name: Get version
+        id: get-version
+        run: |
+          # Extract full tag (e.g., 1.0.0.build.1)
+          FULL_TAG=${GITHUB_REF#refs/tags/}
+          echo "version=$FULL_TAG" >> $GITHUB_OUTPUT
+          echo "tag=$FULL_TAG" >> $GITHUB_OUTPUT
+
+          echo "Version: $FULL_TAG"
+
+      - name: Update Helm chart versions
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+        run: |
+          cd kubernetes-deployment/helm-charts
+
+          # Update version, appVersion, and image tag (all use full version: x.x.x.build.x)
+          for chart in discovery restore inventory cloud-accounts compliance drift posture api-gateway frontend; do
+            echo "Updating $chart Chart.yaml to version $VERSION..."
+            sed -i "s/^version:.*/version: $VERSION/" $chart/Chart.yaml
+            sed -i "s/^appVersion:.*/appVersion: \"$VERSION\"/" $chart/Chart.yaml
+            
+            # Update image tag and registry in values.yaml
+            sed -i "s|registry:.*|registry: ${ECR_REGISTRY}/ascintra|" $chart/values.yaml
+            sed -i "s/tag:.*/tag: \"$VERSION\"/" $chart/values.yaml
+          done
+
+          echo "✅ Chart versions updated to $VERSION"
+
+      - name: Package Helm charts
+        env:
+          VERSION: ${{ steps.get-version.outputs.version }}
+        run: |
+          cd kubernetes-deployment/helm-charts
+          mkdir -p ../../helm-packages
+
+          for chart in discovery restore inventory cloud-accounts compliance drift posture api-gateway frontend; do
+            echo "Packaging $chart chart version $VERSION..."
+            helm package $chart --destination ../../helm-packages/
+          done
+
+          echo "Packaged charts:"
+          ls -lh ../../helm-packages/
+
+      - name: Upload Helm charts as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: helm-charts
+          path: helm-packages/*.tgz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: helm-packages/*.tgz
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## Ascintra Release ${{ steps.get-version.outputs.version }}
+
+            ### ✅ Docker Images (AWS ECR)
+            All images pushed to: `${{ env.ECR_REGISTRY }}/ascintra/*:${{ steps.get-version.outputs.version }}`
+
+            ### ✅ Helm Charts (Version ${{ steps.get-version.outputs.version }})
+            Download Helm chart packages from Assets below.
+
+            ### 🚀 Deploy to Production (Manual)
+
+            **Option 1: Via GitHub Actions**
+            1. Go to: Actions → "Deploy to Production (Manual)"
+            2. Click "Run workflow"
+            3. Enter tag: `${{ steps.get-version.outputs.version }}`
+            4. Click "Run workflow"
+
+            **Option 2: Via Helm CLI**
+            ```bash
+            # Download chart
+            wget https://github.com/${{ github.repository }}/releases/download/${{ steps.get-version.outputs.version }}/ascintra-discovery-${{ steps.get-version.outputs.version }}.tgz
+
+            # Deploy
+            helm upgrade --install ascintra-discovery \
+              ascintra-discovery-${{ steps.get-version.outputs.version }}.tgz \
+              -n ascintra \
+              --wait
+            ```
+
+            **Note**: This release only builds and packages. Deployment is a separate manual step.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

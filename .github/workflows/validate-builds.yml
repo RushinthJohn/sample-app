@@ -1,0 +1,62 @@
+name: Validate Docker Builds
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'services/**'
+      - 'frontend/**'
+      - 'shared-models/**'
+      - '.github/workflows/validate-builds.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  validate-builds:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        service:
+          - discovery
+          - restore
+          - inventory
+          - cloud-accounts
+          - compliance
+          - drift
+          - posture
+          - api-gateway
+          - frontend
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Determine service path
+        id: service-path
+        run: |
+          if [[ "${{ matrix.service }}" == "frontend" ]]; then
+            echo "path=frontend" >> $GITHUB_OUTPUT
+          else
+            echo "path=services/${{ matrix.service }}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build Docker image (validation only)
+        run: |
+          docker build \
+            -t ascintra/${{ matrix.service }}:test \
+            -f ${{ steps.service-path.outputs.path }}/Dockerfile \
+            ${{ steps.service-path.outputs.path }}
+          
+          echo "✅ Build successful for ${{ matrix.service }}"
+      
+      - name: Validate image
+        run: |
+          # Check if image was created
+          docker images ascintra/${{ matrix.service }}:test
+          
+          echo "✅ Image validation successful"
