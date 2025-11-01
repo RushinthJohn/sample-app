@@ -1,0 +1,22 @@
+{
+  "name": "sample-app",
+  "version": "1.0.0",
+  "description": "Implement a CI/CD pipeline to automate the build, testing, deployment, and monitoring of a microservices-based web application on AWS",
+  "main": "hello.js",
+  "scripts": {
+    "test": "node test/test.js",
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RushinthJohn/sample-app.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/RushinthJohn/sample-app/issues"
+  },
+  "homepage": "https://github.com/RushinthJohn/sample-app#readme"
+}
