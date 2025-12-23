@@ -20,7 +20,7 @@ jobs:
         name: Pull to QA from main branch
         runs-on: ubuntu-latest
         environment:
-            name: staging
+            name: qa
             url: https://ascintra.yourdomain.com
 
         steps:
