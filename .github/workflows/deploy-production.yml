@@ -15,10 +15,6 @@ permissions:
     pull-requests: write # Needed for creating the pull request
     contents: read
 
-env:
-    AWS_REGION: ${{ secrets.AWS_REGION }}
-    ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
-
 jobs:
     create-pr-qa:
         name: Pull to QA from main branch
