@@ -21,6 +21,7 @@ jobs:
         runs-on: ubuntu-latest
         environment:
             name: qa
+            url: https://ascintra.yourdomain.com
 
         steps:
             - name: Checkout code
@@ -67,6 +68,7 @@ jobs:
         runs-on: ubuntu-latest
         environment:
             name: prod
+            url: https://ascintra.yourdomain.com
 
         steps:
             - name: Checkout code
