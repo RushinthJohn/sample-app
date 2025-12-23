@@ -1,375 +1,112 @@
-name: Deploy to Production (Manual)
+name: Promote to QA & Prod
+
+concurrency:
+  group: pr-promotion
+  cancel-in-progress: true
 
 on:
-    workflow_dispatch:
-        inputs:
-            tag:
-                description: "Tag/Version to deploy (e.g., 1.0.0.build.1)"
-                required: true
-                type: string
-            namespace:
-                description: "Kubernetes namespace"
-                required: false
-                default: "ascintra"
-                type: string
+    push:
+        tags:
+            - "v*.*.*" # Triggers on tags like v1.0.0, v1.0.1, etc.
+
+permissions:
+    # actions: write # Needed for creating workflow runs
+    # contents: write # Needed for creating a new branch/commit
+    pull-requests: write # Needed for creating the pull request
+    contents: read
 
 env:
     AWS_REGION: ${{ secrets.AWS_REGION }}
     ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
 
 jobs:
-    deploy-to-staging:
+    create-pr-qa:
+        name: Pull to QA from main branch
         runs-on: ubuntu-latest
         environment:
-            name: staging
-            url: https://ascintra.yourdomain.com
+            name: qa
 
         steps:
-            # - name: Checkout code
-            #   uses: actions/checkout@v4
-            #   with:
-            #       ref: ${{ github.event.inputs.tag }}
-
-            - name: Validate tag format
-              run: |
-                  TAG="${{ github.event.inputs.tag }}"
-                  if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.build\.[0-9]+$ ]]; then
-                    echo "❌ Invalid tag format. Expected: x.x.x.build.x (e.g., 1.0.0.build.1)"
-                    exit 1
-                  fi
-                  echo "✅ Valid tag format: $TAG"
-
-            - name: Configure AWS credentials
-              uses: aws-actions/configure-aws-credentials@v4
+            - name: Checkout code
+              uses: actions/checkout@v4
+              # The following line is crucial: it fetches all tags and history
+              # which is needed for proper branching operations in the next step.
               with:
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  aws-region: ${{ secrets.AWS_REGION }}
+                fetch-depth: 0
 
-            - name: Update kubeconfig for production
+            - name: Create Pull Request
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  echo "✅ Connected to production EKS cluster: ${{ secrets.EKS_CLUSTER_NAME }}"
+                # Extract the tag name that triggered the workflow
+                TAG_NAME=${{ github.ref_name }}
 
-        #   - name: Update kubeconfig for production
-        #     run: |
-        #       aws eks update-kubeconfig \
-        #         --name ${{ secrets.EKS_CLUSTER_NAME }} \
-        #         --region ${{ secrets.AWS_REGION }}
+                # Define the head branch for the PR (can be the same as the tag name)
+                HEAD_BRANCH="main"
 
-        #       echo "✅ Connected to production EKS cluster: ${{ secrets.EKS_CLUSTER_NAME }}"
-        #       kubectl cluster-info
+                # Define the base branch you want to merge into (e.g., 'main' or 'develop')
+                BASE_BRANCH="qa"
 
-        #   - name: Verify ECR images exist
-        #     env:
-        #       TAG: ${{ github.event.inputs.tag }}
-        #     run: |
-        #       echo "Verifying images exist in ECR for tag: $TAG"
+                # Find existing open PR from current branch to base branch
+                EXISTING_PR=$(gh pr list \
+                    --base "$BASE_BRANCH" \
+                    --head "$CURRENT_BRANCH" \
+                    --state open \
+                    --json number \
+                    --jq '.[0].number // empty')
 
-        #       for service in discovery restore inventory cloud-accounts compliance drift posture api-gateway frontend; do
-        #         echo "Checking ascintra/$service:$TAG..."
-        #         aws ecr describe-images \
-        #           --repository-name ascintra/$service \
-        #           --image-ids imageTag=$TAG \
-        #           --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 || {
-        #             echo "❌ Image not found: ascintra/$service:$TAG"
-        #             echo "Please ensure the release was built and pushed to ECR"
-        #             exit 1
-        #           }
-        #       done
+                if [ -n "$EXISTING_PR" ]; then
+                    echo "Found existing open PR #$EXISTING_PR → closing it"
+                    gh pr close "$EXISTING_PR" --comment "Closing in favor of a new up-to-date PR"
+                else
+                    echo "No existing open PR found"
+                fi
 
-        #       echo "✅ All images verified in ECR"
+                # Use GitHub CLI to create the pull request
+                gh pr create --base $BASE_BRANCH --head $HEAD_BRANCH --title "Merge from main to QA for $TAG_NAME" --body "This pull request is to merge $TAG_NAME to QA from main"
 
-        #   - name: Install Helm
-        #     uses: azure/setup-helm@v3
-        #     with:
-        #       version: '3.12.0'
-
-        #   - name: Create namespace if not exists
-        #     run: |
-        #       kubectl create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
-
-        #   - name: Deploy Helm charts to production
-        #     env:
-        #       TAG: ${{ github.event.inputs.tag }}
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #       ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
-        #     run: |
-        #       cd kubernetes-deployment
-
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo "Deploying version $TAG to production namespace: $NAMESPACE"
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-        #       # Deploy each service with production settings
-        #       for service in discovery restore inventory cloud-accounts compliance drift posture api-gateway frontend; do
-        #         echo ""
-        #         echo "📦 Deploying $service..."
-        #         echo "────────────────────────────────────────────────────────"
-
-        #         helm upgrade --install "ascintra-$service" \
-        #           ./helm-charts/$service \
-        #           --namespace $NAMESPACE \
-        #           --set image.registry=$ECR_REGISTRY/ascintra \
-        #           --set image.tag=$TAG \
-        #           --set image.pullPolicy=Always \
-        #           --wait \
-        #           --timeout 10m || {
-        #             echo "❌ Failed to deploy $service"
-        #             exit 1
-        #           }
-
-        #         echo "✅ $service deployed successfully"
-        #       done
-
-        #       echo ""
-        #       echo "🎉 All services deployed to production!"
-
-        #   - name: Verify deployment
-        #     env:
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo "Deployment Verification"
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-        #       echo ""
-        #       echo "📊 Pods:"
-        #       kubectl get pods -n $NAMESPACE
-
-        #       echo ""
-        #       echo "🌐 Services:"
-        #       kubectl get svc -n $NAMESPACE
-
-        #       echo ""
-        #       echo "🔗 Ingress:"
-        #       kubectl get ingress -n $NAMESPACE 2>/dev/null || echo "No ingress configured"
-
-        #   - name: Wait for pods to be ready
-        #     env:
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "⏳ Waiting for pods to be ready (max 5 minutes)..."
-
-        #       kubectl wait --for=condition=ready pod \
-        #         -l tier=backend \
-        #         -n $NAMESPACE \
-        #         --timeout=300s || {
-        #           echo "⚠️ Some pods are not ready yet"
-        #           kubectl get pods -n $NAMESPACE
-        #         }
-
-        #   - name: Run smoke tests
-        #     env:
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "🧪 Running smoke tests..."
-
-        #       # Test discovery service
-        #       kubectl port-forward svc/ascintra-discovery 8002:8002 -n $NAMESPACE &
-        #       PF_PID=$!
-        #       sleep 5
-
-        #       curl -f http://localhost:8002/health && echo "✅ Discovery health check passed" || echo "⚠️ Discovery health check failed"
-
-        #       kill $PF_PID || true
-
-        #   - name: Deployment summary
-        #     if: always()
-        #     env:
-        #       TAG: ${{ github.event.inputs.tag }}
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo "📋 Deployment Summary"
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo ""
-        #       echo "✓ Version deployed: $TAG"
-        #       echo "✓ Namespace: $NAMESPACE"
-        #       echo "✓ Services: 9"
-        #       echo "✓ Environment: Production"
-        #       echo ""
-        #       echo "Access production at: https://ascintra.yourdomain.com"
-        #       echo ""
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-    deploy-to-production:
+    create-pr-rpod:
+        name: Pull to Prod from QA branch
+        needs: create-pr-qa
         runs-on: ubuntu-latest
-        needs: deploy-to-staging
         environment:
-            name: production
-            url: https://ascintra.yourdomain.com
+            name: prod
 
         steps:
-            # - name: Checkout code
-            #   uses: actions/checkout@v4
-            #   with:
-            #       ref: ${{ github.event.inputs.tag }}
-
-            - name: Validate tag format
-              run: |
-                  TAG="${{ github.event.inputs.tag }}"
-                  if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.build\.[0-9]+$ ]]; then
-                    echo "❌ Invalid tag format. Expected: x.x.x.build.x (e.g., 1.0.0.build.1)"
-                    exit 1
-                  fi
-                  echo "✅ Valid tag format: $TAG"
-
-            - name: Configure AWS credentials
-              uses: aws-actions/configure-aws-credentials@v4
+            - name: Checkout code
+              uses: actions/checkout@v4
+              # The following line is crucial: it fetches all tags and history
+              # which is needed for proper branching operations in the next step.
               with:
-                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-                  aws-region: ${{ secrets.AWS_REGION }}
-            - name: Update kubeconfig for production
+                fetch-depth: 0
+
+            - name: Create Pull Request
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
-                  echo "✅ Connected to production EKS cluster: ${{ secrets.EKS_CLUSTER_NAME }}"
+                # Extract the tag name that triggered the workflow
+                TAG_NAME=${{ github.ref_name }}
 
-        #   - name: Update kubeconfig for production
-        #     run: |
-        #       aws eks update-kubeconfig \
-        #         --name ${{ secrets.EKS_CLUSTER_NAME }} \
-        #         --region ${{ secrets.AWS_REGION }}
+                # Define the head branch for the PR (can be the same as the tag name)
+                HEAD_BRANCH="qa"
 
-        #       echo "✅ Connected to production EKS cluster: ${{ secrets.EKS_CLUSTER_NAME }}"
-        #       kubectl cluster-info
+                # Define the base branch you want to merge into (e.g., 'main' or 'develop')
+                BASE_BRANCH="prod"
 
-        #   - name: Verify ECR images exist
-        #     env:
-        #       TAG: ${{ github.event.inputs.tag }}
-        #     run: |
-        #       echo "Verifying images exist in ECR for tag: $TAG"
+                # Find existing open PR from current branch to base branch
+                EXISTING_PR=$(gh pr list \
+                    --base "$BASE_BRANCH" \
+                    --head "$CURRENT_BRANCH" \
+                    --state open \
+                    --json number \
+                    --jq '.[0].number // empty')
 
-        #       for service in discovery restore inventory cloud-accounts compliance drift posture api-gateway frontend; do
-        #         echo "Checking ascintra/$service:$TAG..."
-        #         aws ecr describe-images \
-        #           --repository-name ascintra/$service \
-        #           --image-ids imageTag=$TAG \
-        #           --region ${{ secrets.AWS_REGION }} > /dev/null 2>&1 || {
-        #             echo "❌ Image not found: ascintra/$service:$TAG"
-        #             echo "Please ensure the release was built and pushed to ECR"
-        #             exit 1
-        #           }
-        #       done
+                if [ -n "$EXISTING_PR" ]; then
+                    echo "Found existing open PR #$EXISTING_PR → closing it"
+                    gh pr close "$EXISTING_PR" --comment "Closing in favor of a new up-to-date PR"
+                else
+                    echo "No existing open PR found"
+                fi
 
-        #       echo "✅ All images verified in ECR"
-
-        #   - name: Install Helm
-        #     uses: azure/setup-helm@v3
-        #     with:
-        #       version: '3.12.0'
-
-        #   - name: Create namespace if not exists
-        #     run: |
-        #       kubectl create namespace ${{ github.event.inputs.namespace }} --dry-run=client -o yaml | kubectl apply -f -
-
-        #   - name: Deploy Helm charts to production
-        #     env:
-        #       TAG: ${{ github.event.inputs.tag }}
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #       ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
-        #     run: |
-        #       cd kubernetes-deployment
-
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo "Deploying version $TAG to production namespace: $NAMESPACE"
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-        #       # Deploy each service with production settings
-        #       for service in discovery restore inventory cloud-accounts compliance drift posture api-gateway frontend; do
-        #         echo ""
-        #         echo "📦 Deploying $service..."
-        #         echo "────────────────────────────────────────────────────────"
-
-        #         helm upgrade --install "ascintra-$service" \
-        #           ./helm-charts/$service \
-        #           --namespace $NAMESPACE \
-        #           --set image.registry=$ECR_REGISTRY/ascintra \
-        #           --set image.tag=$TAG \
-        #           --set image.pullPolicy=Always \
-        #           --wait \
-        #           --timeout 10m || {
-        #             echo "❌ Failed to deploy $service"
-        #             exit 1
-        #           }
-
-        #         echo "✅ $service deployed successfully"
-        #       done
-
-        #       echo ""
-        #       echo "🎉 All services deployed to production!"
-
-        #   - name: Verify deployment
-        #     env:
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo "Deployment Verification"
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-        #       echo ""
-        #       echo "📊 Pods:"
-        #       kubectl get pods -n $NAMESPACE
-
-        #       echo ""
-        #       echo "🌐 Services:"
-        #       kubectl get svc -n $NAMESPACE
-
-        #       echo ""
-        #       echo "🔗 Ingress:"
-        #       kubectl get ingress -n $NAMESPACE 2>/dev/null || echo "No ingress configured"
-
-        #   - name: Wait for pods to be ready
-        #     env:
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "⏳ Waiting for pods to be ready (max 5 minutes)..."
-
-        #       kubectl wait --for=condition=ready pod \
-        #         -l tier=backend \
-        #         -n $NAMESPACE \
-        #         --timeout=300s || {
-        #           echo "⚠️ Some pods are not ready yet"
-        #           kubectl get pods -n $NAMESPACE
-        #         }
-
-        #   - name: Run smoke tests
-        #     env:
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "🧪 Running smoke tests..."
-
-        #       # Test discovery service
-        #       kubectl port-forward svc/ascintra-discovery 8002:8002 -n $NAMESPACE &
-        #       PF_PID=$!
-        #       sleep 5
-
-        #       curl -f http://localhost:8002/health && echo "✅ Discovery health check passed" || echo "⚠️ Discovery health check failed"
-
-        #       kill $PF_PID || true
-
-        #   - name: Deployment summary
-        #     if: always()
-        #     env:
-        #       TAG: ${{ github.event.inputs.tag }}
-        #       NAMESPACE: ${{ github.event.inputs.namespace }}
-        #     run: |
-        #       echo ""
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo "📋 Deployment Summary"
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        #       echo ""
-        #       echo "✓ Version deployed: $TAG"
-        #       echo "✓ Namespace: $NAMESPACE"
-        #       echo "✓ Services: 9"
-        #       echo "✓ Environment: Production"
-        #       echo ""
-        #       echo "Access production at: https://ascintra.yourdomain.com"
-        #       echo ""
-        #       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                # Use GitHub CLI to create the pull request
+                gh pr create --base $BASE_BRANCH --head $HEAD_BRANCH --title "Merge from QA to Prod for $TAG_NAME" --body "This pull request is to merge $TAG_NAME to Prod from QA"
