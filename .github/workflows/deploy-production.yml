@@ -1,0 +1,110 @@
+name: Promote to QA & Prod
+
+concurrency:
+  group: pr-promotion
+  cancel-in-progress: true
+
+on:
+    push:
+        tags:
+            - "v*.*.*" # Triggers on tags like v1.0.0, v1.0.1, etc.
+
+permissions:
+    # actions: write # Needed for creating workflow runs
+    # contents: write # Needed for creating a new branch/commit
+    pull-requests: write # Needed for creating the pull request
+    contents: read
+
+jobs:
+    create-pr-qa:
+        name: Pull to QA from main branch
+        runs-on: ubuntu-latest
+        environment:
+            name: qa
+            url: https://ascintra.yourdomain.com
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              # The following line is crucial: it fetches all tags and history
+              # which is needed for proper branching operations in the next step.
+              with:
+                fetch-depth: 0
+
+            - name: Create Pull Request
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                # Extract the tag name that triggered the workflow
+                TAG_NAME=${{ github.ref_name }}
+
+                # Define the head branch for the PR (can be the same as the tag name)
+                HEAD_BRANCH="main"
+
+                # Define the base branch you want to merge into (e.g., 'main' or 'develop')
+                BASE_BRANCH="qa"
+
+                # Find existing open PR from current branch to base branch
+                EXISTING_PR=$(gh pr list \
+                    --base "$BASE_BRANCH" \
+                    --head "$CURRENT_BRANCH" \
+                    --state open \
+                    --json number \
+                    --jq '.[0].number // empty')
+
+                if [ -n "$EXISTING_PR" ]; then
+                    echo "Found existing open PR #$EXISTING_PR → closing it"
+                    gh pr close "$EXISTING_PR" --comment "Closing in favor of a new up-to-date PR"
+                else
+                    echo "No existing open PR found"
+                fi
+
+                # Use GitHub CLI to create the pull request
+                gh pr create --base $BASE_BRANCH --head $HEAD_BRANCH --title "Merge from main to QA for $TAG_NAME" --body "This pull request is to merge $TAG_NAME to QA from main"
+
+    create-pr-rpod:
+        name: Pull to Prod from QA branch
+        needs: create-pr-qa
+        runs-on: ubuntu-latest
+        environment:
+            name: prod
+            url: https://ascintra.yourdomain.com
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              # The following line is crucial: it fetches all tags and history
+              # which is needed for proper branching operations in the next step.
+              with:
+                fetch-depth: 0
+
+            - name: Create Pull Request
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                # Extract the tag name that triggered the workflow
+                TAG_NAME=${{ github.ref_name }}
+
+                # Define the head branch for the PR (can be the same as the tag name)
+                HEAD_BRANCH="qa"
+
+                # Define the base branch you want to merge into (e.g., 'main' or 'develop')
+                BASE_BRANCH="prod"
+
+                # Find existing open PR from current branch to base branch
+                EXISTING_PR=$(gh pr list \
+                    --base "$BASE_BRANCH" \
+                    --head "$CURRENT_BRANCH" \
+                    --state open \
+                    --json number \
+                    --jq '.[0].number // empty')
+
+                if [ -n "$EXISTING_PR" ]; then
+                    echo "Found existing open PR #$EXISTING_PR → closing it"
+                    gh pr close "$EXISTING_PR" --comment "Closing in favor of a new up-to-date PR"
+                else
+                    echo "No existing open PR found"
+                fi
+
+                # Use GitHub CLI to create the pull request
+                gh pr create --base $BASE_BRANCH --head $HEAD_BRANCH --title "Merge from QA to Prod for $TAG_NAME" --body "This pull request is to merge $TAG_NAME to Prod from QA"
